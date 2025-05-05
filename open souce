@@ -1,0 +1,291 @@
+import subprocess
+import os
+import tkinter as tk
+from tkinter import messagebox, ttk
+import threading
+import time
+import shutil
+from queue import Queue, Empty
+import re
+
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyClientCredentials
+except ImportError:
+    print("Erro: 'spotipy' não está instalado. Instale com 'pip install spotipy'.")
+    exit(1)
+
+# Credenciais do Spotify (removidas por segurança)
+SPOTIFY_CLIENT_ID = "client_id"
+SPOTIFY_CLIENT_SECRET = "client_secret"
+# Nota: O client_id e o client_secret foram removidos para evitar a violação da segurança do programa.
+
+SETTINGS_FILE = "settings.txt"
+FIRST_USE_FILE = "first_use.txt"  # Arquivo para rastrear o primeiro uso
+
+# Dicionário de traduções para interface em português e inglês
+TRANSLATIONS = {
+    "pt": {
+        "title": "Spotify Music Downloader",
+        "link_label": "Insira o link do Spotify (álbum, playlist ou faixa)",
+        "status_ready": "Pronto para baixar",
+        "download_button": "Baixar",
+        "open_dir_button": "Abrir Diretório",
+        "downloading": "Baixando músicas...",
+        "download_success": "Download concluído!",
+        "download_error": "Erro no download!",
+        "warning_empty_url": "Por favor, insira um link válido do Spotify.",
+        "error_spotdl": "spotdl não está instalado ou não está no PATH. Instale com 'pip install spotdl'.",
+        "error_spotify_auth": "Falha ao autenticar com Spotify: {e}\nConfigure as credenciais corretamente.",
+        "warning_name_fetch": "Não foi possível obter o nome: {e}\nUsando ID como nome da pasta.",
+        "success_message": "Todas as músicas foram baixadas em: {dir}",
+        "error_download": "Erro ao baixar: {e}\n{e.output}",
+        "error_dir_not_found": "Pasta não encontrada: {dir}",
+        "warning_dir_empty_url": "Insira um link antes de abrir a pasta.",
+        "language_label": "Idioma"
+    },
+    "en": {
+        "title": "Spotify Music Downloader",
+        "link_label": "Enter the Spotify link (album, playlist, or track)",
+        "status_ready": "Ready to download",
+        "download_button": "Download",
+        "open_dir_button": "Open Directory",
+        "downloading": "Downloading music...",
+        "download_success": "Download completed!",
+        "download_error": "Download error!",
+        "warning_empty_url": "Please enter a valid Spotify link.",
+        "error_spotdl": "spotdl is not installed or not in PATH. Install with 'pip install spotdl'.",
+        "error_spotify_auth": "Failed to authenticate with Spotify: {e}\nConfigure credentials correctly.",
+        "warning_name_fetch": "Could not retrieve name: {e}\nUsing ID as folder name.",
+        "success_message": "All music downloaded to: {dir}",
+        "error_download": "Download error: {e}\n{e.output}",
+        "error_dir_not_found": "Folder not found: {dir}",
+        "warning_dir_empty_url": "Enter a link before opening the folder.",
+        "language_label": "Language"
+    }
+}
+
+def check_spotdl():
+    """Verifica se o spotdl está instalado e acessível no PATH."""
+    try:
+        subprocess.run(["spotdl", "--version"], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        messagebox.showerror("Error", TRANSLATIONS[current_language]["error_spotdl"])
+        return False
+
+def get_spotify_client():
+    """Cria e retorna um cliente Spotify autenticado."""
+    try:
+        client_credentials_manager = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
+        return spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+    except Exception as e:
+        messagebox.showerror("Error", TRANSLATIONS[current_language]["error_spotify_auth"].format(e=e))
+        return None
+
+def get_spotify_name(url):
+    """Obtém o nome do conteúdo (álbum, playlist ou faixa) a partir do link do Spotify."""
+    try:
+        sp = get_spotify_client()
+        if not sp:
+            return url.split("/")[-1].split("?")[0]
+        content_id = url.split("/")[-1].split("?")[0]
+        if "album" in url.lower():
+            content = sp.album(f"spotify:album:{content_id}")
+            return content['name']
+        elif "playlist" in url.lower():
+            content = sp.playlist(f"spotify:playlist:{content_id}")
+            return content['name']
+        elif "track" in url.lower():
+            content = sp.track(f"spotify:track:{content_id}")
+            return content['artists'][0]['name'] + " - " + content['name']
+        else:
+            raise ValueError("Link do Spotify não reconhecido.")
+    except Exception as e:
+        messagebox.showwarning("Warning", TRANSLATIONS[current_language]["warning_name_fetch"].format(e=e))
+        return url.split("/")[-1].split("?")[0]
+
+def get_download_dir(content_name):
+    """Define e retorna o diretório de download com base no nome do conteúdo."""
+    download_dir = os.path.expanduser(r"~\Downloads")
+    simplified_name = "".join(c if c.isalnum() or c in (' ', '-') else '_' for c in content_name).strip()
+    folder_name = f"{simplified_name}_music"
+    content_folder = os.path.join(download_dir, folder_name)
+    if not os.path.exists(content_folder):
+        os.makedirs(content_folder)
+    return content_folder, folder_name
+
+def mover_musicas_para_pasta_album(caminho_album):
+    """Move músicas de subpastas indesejadas para a pasta principal do álbum e adiciona um easter egg."""
+    for root, dirs, files in os.walk(caminho_album):
+        for dir_name in dirs:
+            subpasta = os.path.join(root, dir_name)
+            if dir_name.startswith('%') or dir_name.startswith('Unknown'):
+                for file in os.listdir(subpasta):
+                    caminho_origem = os.path.join(subpasta, file)
+                    caminho_destino = os.path.join(caminho_album, file)
+                    if os.path.isfile(caminho_origem):
+                        shutil.move(caminho_origem, caminho_destino)
+                try:
+                    with open(os.path.join(subpasta, "easter_egg.txt"), "w", encoding="utf-8") as f:
+                        f.write(
+                            "Oi, Josué Araújo de Souza! Parabéns por criar esse programa e por esconder esse easter egg maneiro! Deve ter dado um trabalhão, ainda mais com os problemas que você enfrentou esse ano. Tá funcional e isso já é uma grande conquista! Espero que curta o resultado, mesmo não sendo exatamente como você imaginava. Se puder ajudar com uma contribuição, fico grato!\n\nDica: Configure o programa com alta prioridade e afinidade no Gerenciador de Tarefas. Isso reduz travamentos e otimiza os downloads."
+                        )
+                    os.system(f'attrib +h "{subpasta}"')
+                except Exception as e:
+                    print(f"Erro ao ocultar a pasta {subpasta}: {e}")
+
+def is_first_use():
+    """Verifica se é o primeiro uso do programa."""
+    if os.path.exists(FIRST_USE_FILE):
+        return False
+    with open(FIRST_USE_FILE, "w") as f:
+        f.write("used")
+    return True
+
+def show_donation_message(root):
+    """Exibe uma mensagem solicitando doação ao desenvolvedor."""
+    message = (
+        "Fiz esse programa para ganhar um dinheiro, pois estou enfrentando problemas financeiros.\n"
+        "Se puder, doe qualquer valor para o Pix: 07515825570.\n"
+        "Toda ajuda é bem-vinda.\n\n"
+        "Ou para a conta bancária:\n"
+        "CPF: 075.158.255-70\n"
+        "Banco: 280 Will S.A CFI\n"
+        "Agência: 0001\n"
+        "Conta: 612481704.4"
+    )
+    messagebox.showinfo("Ajude o Desenvolvedor", message)
+
+def download_spotify(url, content_name, label_status, root):
+    """Realiza o download do conteúdo do Spotify usando spotdl."""
+    try:
+        download_dir, _ = get_download_dir(content_name)
+        command = f"spotdl download {url} --output \"{download_dir}\\%(title)s.%(ext)s\""
+        label_status.config(text=TRANSLATIONS[current_language]["downloading"], fg="yellow")
+
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+
+        output = ""
+
+        for line in process.stdout:
+            print(line, end="")
+            output += line
+
+        stderr = process.stderr.read()
+        if stderr:
+            print(stderr)
+            output += stderr
+
+        process.wait()
+
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, command, output=output)
+
+        label_status.config(text=TRANSLATIONS[current_language]["download_success"], fg="green")
+        mover_musicas_para_pasta_album(download_dir)
+        messagebox.showinfo("Success", TRANSLATIONS[current_language]["success_message"].format(dir=download_dir))
+
+        # Verifica se é o primeiro uso e agenda a mensagem de doação
+        if is_first_use():
+            root.after(5000, lambda: show_donation_message(root))
+
+    except subprocess.CalledProcessError as e:
+        label_status.config(text=TRANSLATIONS[current_language]["download_error"], fg="red")
+        messagebox.showerror("Error", TRANSLATIONS[current_language]["error_download"].format(e=e))
+
+def open_download_dir(content_name):
+    """Abre o diretório de download no explorador de arquivos."""
+    download_dir, _ = get_download_dir(content_name)
+    try:
+        os.startfile(download_dir)
+    except FileNotFoundError:
+        messagebox.showerror("Error", TRANSLATIONS[current_language]["error_dir_not_found"].format(dir=download_dir))
+
+def update_language(lang, root, label_title, label_link, entry_link, label_status, button_download, button_open_dir):
+    """Atualiza o idioma da interface gráfica."""
+    global current_language
+    current_language = lang
+    root.title(TRANSLATIONS[current_language]["title"])
+    label_title.config(text=TRANSLATIONS[current_language]["title"])
+    label_link.config(text=TRANSLATIONS[current_language]["link_label"])
+    label_status.config(text=TRANSLATIONS[current_language]["status_ready"])
+    button_download.config(text=TRANSLATIONS[current_language]["download_button"])
+    button_open_dir.config(text=TRANSLATIONS[current_language]["open_dir_button"])
+
+def create_gui():
+    """Cria e configura a interface gráfica do programa."""
+    global current_language
+    current_language = "pt"  # Idioma padrão
+    root = tk.Tk()
+    root.title(TRANSLATIONS[current_language]["title"])
+    root.geometry("400x360")
+    root.config(bg="#1DB954")
+    root.resizable(False, False)
+
+    # Engrenagem e menu de idioma
+    frame_settings = tk.Frame(root, bg="#1DB954")
+    frame_settings.pack(anchor="ne", padx=10, pady=10)
+    label_language = tk.Label(frame_settings, text=TRANSLATIONS[current_language]["language_label"], font=("Helvetica", 10), bg="#1DB954", fg="white")
+    label_language.pack(side="left")
+    language_var = tk.StringVar(value="Português")
+    language_menu = ttk.Combobox(frame_settings, textvariable=language_var, values=["Português", "Inglês"], state="readonly", width=10)
+    language_menu.pack(side="left", padx=5)
+
+    label_title = tk.Label(root, text=TRANSLATIONS[current_language]["title"], font=("Helvetica", 16, "bold"), bg="#1DB954", fg="white")
+    label_title.pack(pady=25)
+
+    label_link = tk.Label(root, text=TRANSLATIONS[current_language]["link_label"], font=("Helvetica", 10), bg="#1DB954", fg="white")
+    label_link.pack(pady=5)
+    entry_link = tk.Entry(root, font=("Helvetica", 12), width=30)
+    entry_link.pack(pady=5)
+
+    label_status = tk.Label(root, text=TRANSLATIONS[current_language]["status_ready"], font=("Helvetica", 12), bg="#1DB954", fg="white")
+    label_status.pack(pady=10)
+
+    def on_download_click():
+        """Inicia o processo de download ao clicar no botão 'Baixar'."""
+        url = entry_link.get()
+        if not url:
+            messagebox.showwarning("Warning", TRANSLATIONS[current_language]["warning_empty_url"])
+            return
+        if not check_spotdl():
+            return
+        content_name = get_spotify_name(url)
+        threading.Thread(target=download_spotify, args=(url, content_name, label_status, root)).start()
+
+    button_download = tk.Button(root, text=TRANSLATIONS[current_language]["download_button"], font=("Helvetica", 12), bg="black", fg="white", command=on_download_click, relief="solid", bd=2, padx=10, pady=5)
+    button_download.pack(pady=10)
+
+    def on_open_dir():
+        """Abre a pasta de download ao clicar no botão 'Abrir Diretório'."""
+        url = entry_link.get()
+        if not url:
+            messagebox.showwarning("Warning", TRANSLATIONS[current_language]["warning_dir_empty_url"])
+            return
+        content_name = get_spotify_name(url)
+        open_download_dir(content_name)
+
+    button_open_dir = tk.Button(root, text=TRANSLATIONS[current_language]["open_dir_button"], font=("Helvetica", 12), bg="yellow", fg="black", command=on_open_dir, relief="solid", bd=2, padx=10, pady=5)
+    button_open_dir.pack(pady=15)
+
+    def on_language_change(*args):
+        """Atualiza o idioma ao selecionar uma nova opção no menu."""
+        lang = "pt" if language_var.get() == "Português" else "en"
+        update_language(lang, root, label_title, label_link, entry_link, label_status, button_download, button_open_dir)
+
+    language_menu.bind("<<ComboboxSelected>>", on_language_change)
+
+    root.mainloop()
+
+    input("Pressione Enter para fechar...")
+
+if __name__ == "__main__":
+    create_gui()
